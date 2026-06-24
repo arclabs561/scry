@@ -12,8 +12,8 @@ same corpus ranks and groups differently depending on the lens.
 ## Build
 
 ```sh
-cargo build --release        # binary at target/release/scry
-export OPENROUTER_API_KEY=... # lives in ~/.localrc
+cargo build --release          # binary at target/release/scry
+export OPENROUTER_API_KEY=...   # from your environment
 ```
 
 Clustering reuses the [`clump`](https://github.com/arclabs561/clump) crate (EVoC);
@@ -74,7 +74,7 @@ scry --surface both query "approximate nearest neighbor search"
 scry --surface both cluster --scopes purpose --k 10
 ```
 
-Shared flags (before the subcommand): `--root` (default `~/Documents/dev`),
+Shared flags (before the subcommand): `--root` (default: current directory),
 `--model` (default `qwen/qwen3-embedding-8b`), `--dimensions` (Matryoshka
 truncation), `--surface readme|code|both`, `--code-model` (default
 `mistralai/codestral-embed-2505`), `--provider` (pin an OpenRouter provider for

@@ -2,7 +2,7 @@
 //!
 //! Only the two endpoints this tool needs: `/embeddings` (OpenAI-compatible) and
 //! `/chat/completions` (for the dual-LLM planner). The API key is read once from
-//! `OPENROUTER_API_KEY` (it lives in `~/.localrc`).
+//! the `OPENROUTER_API_KEY` environment variable.
 
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
@@ -47,7 +47,7 @@ impl Client {
     /// Build a client, reading `OPENROUTER_API_KEY` from the environment.
     pub fn from_env() -> Result<Self> {
         let key = std::env::var("OPENROUTER_API_KEY")
-            .context("OPENROUTER_API_KEY not set (it lives in ~/.localrc)")?;
+            .context("OPENROUTER_API_KEY not set")?;
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .connect_timeout(std::time::Duration::from_secs(20))

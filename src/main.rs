@@ -17,7 +17,7 @@ use std::path::PathBuf;
     long_about = None
 )]
 struct Cli {
-    /// Directory whose immediate subdirectories are projects (default: ~/Documents/dev).
+    /// Directory whose immediate subdirectories are projects (default: current dir).
     #[arg(long, global = true)]
     root: Option<PathBuf>,
     /// Use a GitHub user's public repos as the corpus instead of a local dir.

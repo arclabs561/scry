@@ -1,4 +1,5 @@
-# expected<TAB>paraphrased query (words deliberately differ from the project's own description)
+# EXAMPLE probe set (for the author's own corpus) — bring your own for your projects.
+# Format: expected<TAB>paraphrased query (words deliberately differ from the project's description).
 ans	lossless data compression with an entropy coder
 cnk	compactly compress a set of integer identifiers
 vicinity	fast approximate nearest neighbor vector search

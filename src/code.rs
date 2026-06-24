@@ -2,8 +2,8 @@
 //!
 //! Lists source files under a project directory (by extension) and splits text
 //! into bounded character chunks. The actual file *reads* are done by the caller
-//! with a per-file timeout, because `~/Documents/dev` lives under iCloud and a
-//! dataless/offloaded file would otherwise block `read_to_string` indefinitely.
+//! with a per-file timeout, because a cloud-synced project tree (e.g. iCloud)
+//! can hold dataless/offloaded files that block `read_to_string` indefinitely.
 //! Symlinks are not followed (avoids loops), and oversize/non-regular files are
 //! skipped.
 

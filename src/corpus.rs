@@ -171,8 +171,8 @@ pub fn resolve_scope(name_or_instruction: &str) -> String {
         .unwrap_or_else(|| name_or_instruction.to_string())
 }
 
-/// The default project root: `~/Documents/dev`.
+/// The default project root: the current directory (its immediate subdirectories
+/// are treated as projects). Override with `--root`.
 pub fn default_root() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    Path::new(&home).join("Documents/dev")
+    std::env::current_dir().unwrap_or_else(|_| ".".into())
 }
