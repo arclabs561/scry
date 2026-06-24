@@ -46,8 +46,7 @@ struct Message {
 impl Client {
     /// Build a client, reading `OPENROUTER_API_KEY` from the environment.
     pub fn from_env() -> Result<Self> {
-        let key = std::env::var("OPENROUTER_API_KEY")
-            .context("OPENROUTER_API_KEY not set")?;
+        let key = std::env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY not set")?;
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .connect_timeout(std::time::Duration::from_secs(20))
@@ -104,6 +103,12 @@ impl Client {
             match resp {
                 Ok(r) => {
                     let mut parsed: EmbedResp = r.json().await.context("decode embeddings")?;
+                    anyhow::ensure!(
+                        parsed.data.len() == inputs.len(),
+                        "embeddings count mismatch: got {} for {} inputs",
+                        parsed.data.len(),
+                        inputs.len()
+                    );
                     parsed.data.sort_by_key(|d| d.index);
                     return Ok(parsed.data.into_iter().map(|d| d.embedding).collect());
                 }

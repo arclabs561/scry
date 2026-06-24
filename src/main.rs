@@ -239,6 +239,9 @@ fn fold_lens(
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if !matches!(cli.surface.as_str(), "readme" | "code" | "both") {
+        bail!("--surface must be readme|code|both (got {:?})", cli.surface);
+    }
     let root = cli.root.clone().unwrap_or_else(corpus::default_root);
     let client = Client::from_env()?.with_provider(cli.provider.clone());
     let cache = Cache::load(Cache::default_path());
@@ -447,6 +450,9 @@ async fn main() -> Result<()> {
             answer,
             json,
         } => {
+            if !matches!(combine.as_str(), "rrf" | "mean" | "max") {
+                bail!("--combine must be rrf|mean|max (got {:?})", combine);
+            }
             let (scopes, query) = plan_scopes(&client, planner, text).await?;
             let names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
             let n = names.len();

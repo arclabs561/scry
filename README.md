@@ -16,9 +16,8 @@ cargo build --release          # binary at target/release/scry
 export OPENROUTER_API_KEY=...   # from your environment
 ```
 
-Clustering reuses the [`clump`](https://github.com/arclabs561/clump) crate (EVoC);
-it is an unpublished sibling, so the dependency is a `path` and this crate is
-local-only.
+Clustering reuses the [`clump`](https://crates.io/crates/clump) crate (EVoC),
+a normal crates.io dependency.
 
 ## Corpus source
 

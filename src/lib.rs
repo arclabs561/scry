@@ -367,7 +367,8 @@ pub struct AskResult {
 
 /// The full ask flow: a planner derives scope lenses, each retrieves, rankings
 /// are RRF-fused, and (optionally) an LLM synthesizes an answer over the top
-/// hits. Shared by the `ask` command, the MCP `scry_ask` tool, and the eval.
+/// hits. Used by the MCP `scry_ask` tool and `eval --answer`; the CLI `ask`
+/// command has a richer variant (combine modes + per-scope detail).
 #[allow(clippy::too_many_arguments)]
 pub async fn ask(
     client: &Client,

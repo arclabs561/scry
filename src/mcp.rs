@@ -10,7 +10,7 @@
 use crate::cache::Cache;
 use crate::corpus::{self, Project};
 use crate::openrouter::Client;
-use crate::{argsort_desc, cosine_scores, embed_texts, plan_scopes, rrf_fuse};
+use crate::{argsort_desc, cosine_scores, embed_texts};
 use anyhow::Result;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -194,63 +194,24 @@ async fn ask_tool(
     text: &str,
     top: usize,
     projects: &[Project],
-    names: &[String],
+    _names: &[String],
     client: &Client,
     cache: &Cache,
     model: &str,
     dims: Option<u32>,
 ) -> Result<Value> {
-    let (scopes, query) = plan_scopes(client, PLANNER, text).await?;
-    let n = names.len();
-    let mut rank_lists: Vec<Vec<usize>> = Vec::new();
-    for instr in &scopes {
-        let inputs: Vec<String> = projects
-            .iter()
-            .map(|p| corpus::format_input(instr, &p.readme))
-            .collect();
-        let docs = embed_texts(client, cache, model, dims, &inputs).await?;
-        let qv = embed_texts(
-            client,
-            cache,
-            model,
-            dims,
-            &[corpus::format_input(instr, &query)],
-        )
-        .await?;
-        let scores = cosine_scores(&docs, &qv[0]);
-        let mut rank_of = vec![0usize; n];
-        for (r, &i) in argsort_desc(&scores).iter().enumerate() {
-            rank_of[i] = r;
-        }
-        rank_lists.push(rank_of);
-    }
-    let fused = rrf_fuse(&rank_lists, n);
-    let order = argsort_desc(&fused);
-    let ctx: String = order
-        .iter()
-        .take(top)
-        .map(|&i| {
-            let snip: String = projects[i].readme.chars().take(1500).collect();
-            format!("## {}\n{snip}", names[i])
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let sys = "Answer the user's question about a collection of software projects using \
-        ONLY the provided summaries. Cite project names in backticks. Be concise. If none \
-        fit, say so.";
-    let answer = client
-        .chat(
-            PLANNER,
-            sys,
-            &format!("Question: {text}\n\nProjects:\n{ctx}"),
-        )
-        .await?;
-    let results: Vec<Value> = order
-        .iter()
-        .take(top)
-        .map(|&i| json!({ "project": names[i] }))
-        .collect();
-    Ok(
-        json!({ "answer": answer, "plan": { "scopes": scopes, "query": query }, "results": results }),
+    let res = crate::ask(
+        client, cache, model, dims, PLANNER, projects, text, top, true,
     )
+    .await?;
+    let results: Vec<Value> = res
+        .ranked
+        .iter()
+        .map(|(name, _)| json!({ "project": name }))
+        .collect();
+    Ok(json!({
+        "answer": res.answer,
+        "plan": { "scopes": res.scopes, "query": res.query },
+        "results": results,
+    }))
 }
