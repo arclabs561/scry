@@ -1,0 +1,30 @@
+# expected<TAB>paraphrased query (words deliberately differ from the project's own description)
+ans	lossless data compression with an entropy coder
+cnk	compactly compress a set of integer identifiers
+vicinity	fast approximate nearest neighbor vector search
+clump	group data points into clusters like dbscan or kmeans
+qntz	product quantization to compress embedding vectors
+infogeom	fisher information metric and natural gradient
+wass	optimal transport distance between probability distributions
+rkhs	reproducing kernel hilbert space methods
+graphops	graph algorithms such as pagerank and centrality
+smtkit	satisfiability modulo theories solving
+subsume	description logic and ontology subsumption reasoning
+anno	named entity recognition over text
+deformat	extract clean article text from web pages
+hopfield	associative memory hopfield network
+flowmatch	flow matching generative model
+netmon	monitor the devices on a home network
+goodreads	read and update goodreads reading shelves
+sbits	succinct rank and select over bitsets
+# harder: abstract paraphrases, synonyms, and ambiguous-family cases
+wass	earth mover's distance between two distributions
+clump	unsupervised partitioning of points into groups
+vicinity	index millions of vectors for similarity lookup
+infogeom	riemannian geometry of statistical manifolds
+subsume	EL++ ontology classification
+mitosis	framework for spawning and budgeting sub-agents
+embedd	turn text into dense vector representations
+hopfield	content-addressable memory that recovers stored patterns
+qntz	reduce vector precision to save memory
+graphops	compute shortest paths and node importance
