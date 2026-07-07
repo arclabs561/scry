@@ -1,29 +1,28 @@
 # scry
 
-Scry your project corpus. Embeds each project's README under one or more *scopes*
-(instruction lenses) via OpenRouter, then clusters them, ranks them against a
-query, or answers a natural-language question by letting a planner LLM choose the
-lenses. Embeddings are cached on disk so unchanged inputs are never re-embedded.
+Search and cluster a set of project READMEs.
 
-The distinguishing idea is the scope: an instruction (purpose / techniques /
-domain, or any free text) prepended to each document before embedding, so the
-same corpus ranks and groups differently depending on the lens.
+`scry` builds embeddings for local project directories or public GitHub repos,
+then ranks, clusters, or answers questions over that corpus. It can embed README
+text, source files, or both. Embeddings are cached on disk so repeated queries do
+not re-embed unchanged inputs.
 
-## Build
+The useful knob is the scope: an instruction such as "purpose", "techniques", or
+"domain" is prepended before embedding, so the same projects can be ranked by
+what they do, how they work, or the field they belong to.
+
+## Install
 
 ```sh
 cargo build --release          # binary at target/release/scry
 export OPENROUTER_API_KEY=...   # from your environment
 ```
 
-Clustering reuses the [`clump`](https://crates.io/crates/clump) crate (EVoC),
-a normal crates.io dependency.
-
-## Corpus source
+## Corpus
 
 By default the corpus is the local project dirs under `--root`. Point `--github
 <user>` at any GitHub user to use their public repos instead (description +
-topics + README per repo, `readme` surface only — there is no local tree for the
+topics + README per repo, `readme` surface only; there is no local tree for the
 code surface). Forks and archived repos are excluded unless `--include-forks`.
 The fetched corpus is cached per user under `~/.cache/scry/github/`; pass
 `--refresh` to refetch. Auth comes from `GITHUB_TOKEN` or `gh auth token`
@@ -35,40 +34,40 @@ scry --github BurntSushi cluster --k 8
 scry --github <user> ask "which repos do graph algorithms"
 ```
 
-## Subcommands
+## Usage
 
 ```sh
-# cluster (EVoC; clusters labeled by their medoid project)
+# Cluster projects. Clusters are labeled by their medoid project.
 scry cluster
 scry cluster --scopes purpose --k 10
 scry cluster --scopes "ml=the machine learning method used"
 
-# query: rank projects under one explicit lens
+# Rank projects under one explicit scope.
 scry query "approximate nearest neighbor search" \
     --scope "the search/indexing technique this project implements" --top 8
 scry query "tools that talk to an LLM" --json
 
-# ask: plan scope(s) -> retrieve -> RRF-fuse; --answer synthesizes a cited reply
+# Ask a question. A planner chooses scopes, retrieval is fused, and --answer
+# synthesizes a cited reply over the top projects.
 scry ask "which projects could help build code search" --top 6
 scry ask "tools for ranking LLM outputs" --answer
-scry --surface both ask "which projects implement vector search"  # +code lens
+scry --surface both ask "which projects implement vector search"
 
-# overlap: near-duplicate / overlapping projects (high pairwise cosine)
+# Find near-duplicate or overlapping projects.
 scry overlap --threshold 0.8
 
-# eval: retrieval accuracy against a probes file (expected<TAB>query lines)
+# Evaluate retrieval against a probes file: expected<TAB>query.
 scry eval tests/probes.tsv          # top-1 / top-3 / MRR over labeled probes
 scry eval tests/probes.tsv --answer # ask-answer quality: cited + grounded rates
 
-# mcp: run as an MCP stdio server so an agent host calls scry_query / scry_ask
+# Run as an MCP stdio server.
 scry mcp
-scry --github BurntSushi mcp        # serve a remote corpus
 
-# code surface: embed source files instead of READMEs (for cluster + query)
+# Embed source files instead of READMEs.
 scry --surface code query "lock-free ring buffer"
 scry --surface code cluster --k 10
 
-# both: fuse readme + code (query = RRF of the two rankings; cluster = joint features)
+# Use README and code together.
 scry --surface both query "approximate nearest neighbor search"
 scry --surface both cluster --scopes purpose --k 10
 ```
@@ -79,7 +78,7 @@ truncation), `--surface readme|code|both`, `--code-model` (default
 `mistralai/codestral-embed-2505`), `--provider` (pin an OpenRouter provider for
 deterministic embeddings; folded into the cache key).
 
-## What gets embedded
+## Surfaces
 
 The `readme` surface leads each document with dense metadata (Cargo.toml /
 package.json `description` + `keywords`) followed by the README, embedded under
@@ -90,17 +89,11 @@ embeds the most representative ones first: entry points (`lib.rs` / `main.rs` /
 otherwise crowd out the real API within the per-project chunk cap). Chunks are
 mean-pooled to one vector per project. iCloud-offloaded files are skipped.
 
-## Surfaces
-
-The `both` surface combines them: for `query` it Reciprocal-Rank-Fuses the
+The `both` surface combines README and code: for `query` it Reciprocal-Rank-Fuses the
 readme and code rankings, and for `cluster` it concatenates the L2-normalized
-readme and code vectors into a joint feature space. All three subcommands honor
-`--surface`: for `ask`, the code ranking
-joins the readme scope rankings as one more lens in the fusion (and with
-`--surface code`, the code ranking is the only lens; with `--surface both`, both;
-clustering is deterministic via a fixed seed).
+readme and code vectors into a joint feature space. Clustering uses a fixed seed.
 
-## Combining multiple scopes
+## Multiple Scopes
 
 `ask` lets the planner pick 1-3 lenses. Cosine ranges differ per lens, so raw
 scores are not comparable across scopes; fusion defaults to Reciprocal Rank
@@ -120,8 +113,17 @@ per-scope `rank` and `cosine`, so a consuming agent sees which lens drove a hit:
 - Code-aware embeddings: `mistralai/codestral-embed-2505`, `google/gemini-embedding-2`.
 - Planner (`ask`): any chat model via `--planner` (default `openai/gpt-4o-mini`).
 
+## MCP
+
+`scry mcp` serves the current corpus over stdio with `scry_query` and
+`scry_ask` tools.
+
 ## Cache
 
 `~/.cache/scry/embeddings.json`, keyed by SHA-256 of `(model, dimensions, exact
 input text)`. The scope instruction is part of the input, so changing the lens
 correctly produces new embeddings. Each run prints `cache: N hit / M miss`.
+
+## License
+
+MIT OR Apache-2.0

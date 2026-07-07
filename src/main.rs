@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
-    about = "Scoped README embeddings + EVoC clustering + dual-LLM ask, over OpenRouter",
+    about = "Search and cluster project READMEs",
     long_about = None
 )]
 struct Cli {

@@ -1,9 +1,10 @@
 //! # scry
 //!
-//! Scry your project corpus: scoped, instruction-conditioned embeddings of
-//! dev-project docs, with EVoC clustering and a dual-LLM "ask" front-end, all
-//! over OpenRouter. Reuses [`clump`] for clustering and talks to OpenRouter
-//! directly via [`openrouter`].
+//! Search and cluster project READMEs.
+//!
+//! `scry` builds embeddings for local project directories or public GitHub
+//! repos, then ranks, clusters, or answers questions over that corpus. It reuses
+//! [`clump`] for clustering and talks to OpenRouter directly via [`openrouter`].
 //!
 //! The central idea is the *scope*: an instruction lens (purpose / techniques /
 //! domain, or any free-text instruction) prepended to each README before
@@ -15,9 +16,8 @@
 //!    [`cache::Cache`] so unchanged inputs are never re-embedded.
 //! 3. [`cluster_labels`] groups one scope's vectors with EVoC; [`medoid_labels`]
 //!    names each cluster by its most central project.
-//! 4. [`rank`] scores projects against a query under one lens; [`rrf_fuse`]
-//!    combines several lenses by Reciprocal Rank Fusion (scale-free, the right
-//!    way to merge rankings whose score ranges differ per lens).
+//! 4. [`cosine_scores`] scores projects against a query under one scope;
+//!    [`rrf_fuse`] combines several scopes by Reciprocal Rank Fusion.
 
 pub mod cache;
 pub mod code;
