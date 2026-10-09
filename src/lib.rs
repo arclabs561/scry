@@ -273,13 +273,14 @@ pub fn medoid_labels(
     out
 }
 
-/// Fuse per-scope rankings by Reciprocal Rank Fusion. `per_scope_ranks[s][i]` is
-/// project `i`'s 0-based rank under scope `s`. Returns a fused score per project.
+/// Fuse per-scope rankings by Reciprocal Rank Fusion (Cormack et al. 2009):
+/// `sum over scopes of 1 / (RRF_K + rank)` with 1-based ranks. `per_scope_ranks[s][i]`
+/// is project `i`'s 0-based rank under scope `s`. Returns a fused score per project.
 pub fn rrf_fuse(per_scope_ranks: &[Vec<usize>], n: usize) -> Vec<f32> {
     let mut fused = vec![0.0f32; n];
     for ranks in per_scope_ranks {
         for (i, &r) in ranks.iter().enumerate() {
-            fused[i] += 1.0 / (RRF_K + r as f32);
+            fused[i] += 1.0 / (RRF_K + (r + 1) as f32);
         }
     }
     fused
@@ -478,7 +479,26 @@ mod tests {
         assert!(fused[0] > fused[1] && fused[1] > fused[2]);
         // a split-decision item beats a consistently-mediocre one is NOT asserted;
         // here we only check monotonicity under agreement.
-        assert!((fused[0] - 2.0 / (RRF_K + 0.0)).abs() < 1e-6);
+        assert!((fused[0] - 2.0 / (RRF_K + 1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rrf_matches_cormack_formula_by_hand() {
+        // Cormack, Clarke & Buettcher 2009: score(d) = sum over rankings of
+        // 1 / (k + rank(d)) with 1-based ranks and k = 60.
+        // Scope A ranks the projects [b, a, c]; scope B ranks them [a, c, b].
+        let a = [1, 0]; // 0-based ranks of project 0 under A and B
+        let b = [0, 2];
+        let c = [2, 1];
+        let fused = rrf_fuse(&[vec![a[0], b[0], c[0]], vec![a[1], b[1], c[1]]], 3);
+        let expect = [
+            1.0 / 62.0 + 1.0 / 61.0,
+            1.0 / 61.0 + 1.0 / 63.0,
+            1.0 / 63.0 + 1.0 / 62.0,
+        ];
+        for (got, want) in fused.iter().zip(expect) {
+            assert!((got - want).abs() < 1e-7, "got {got}, want {want}");
+        }
     }
 
     #[test]
