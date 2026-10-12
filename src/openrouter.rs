@@ -28,6 +28,27 @@ struct EmbedItem {
     index: usize,
 }
 
+impl EmbedResp {
+    fn into_embeddings(mut self, input_count: usize) -> Result<Vec<Vec<f32>>> {
+        anyhow::ensure!(
+            self.data.len() == input_count,
+            "embeddings count mismatch: got {} for {} inputs",
+            self.data.len(),
+            input_count
+        );
+        self.data.sort_by_key(|d| d.index);
+        for (expected, item) in self.data.iter().enumerate() {
+            anyhow::ensure!(
+                item.index == expected,
+                "embeddings index mismatch: expected {}, got {}",
+                expected,
+                item.index
+            );
+        }
+        Ok(self.data.into_iter().map(|d| d.embedding).collect())
+    }
+}
+
 #[derive(Deserialize)]
 struct ChatResp {
     choices: Vec<Choice>,
@@ -102,15 +123,8 @@ impl Client {
                 .and_then(|r| r.error_for_status());
             match resp {
                 Ok(r) => {
-                    let mut parsed: EmbedResp = r.json().await.context("decode embeddings")?;
-                    anyhow::ensure!(
-                        parsed.data.len() == inputs.len(),
-                        "embeddings count mismatch: got {} for {} inputs",
-                        parsed.data.len(),
-                        inputs.len()
-                    );
-                    parsed.data.sort_by_key(|d| d.index);
-                    return Ok(parsed.data.into_iter().map(|d| d.embedding).collect());
+                    let parsed: EmbedResp = r.json().await.context("decode embeddings")?;
+                    return parsed.into_embeddings(inputs.len());
                 }
                 Err(e) if attempt == 3 => return Err(e).context("embeddings request failed"),
                 Err(_) => {
@@ -181,5 +195,52 @@ impl Client {
             .next()
             .map(|c| c.message.content)
             .ok_or_else(|| anyhow!("chat response had no choices"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EmbedResp;
+
+    #[test]
+    fn embeddings_reject_duplicate_indices() {
+        let response: EmbedResp = serde_json::from_str(
+            r#"{"data":[{"index":0,"embedding":[1.0]},{"index":0,"embedding":[2.0]}]}"#,
+        )
+        .unwrap();
+        assert!(response.into_embeddings(2).is_err());
+    }
+
+    #[test]
+    fn embeddings_reject_out_of_range_indices() {
+        let response: EmbedResp = serde_json::from_str(
+            r#"{"data":[{"index":0,"embedding":[1.0]},{"index":2,"embedding":[2.0]}]}"#,
+        )
+        .unwrap();
+        assert!(response.into_embeddings(2).is_err());
+    }
+
+    #[test]
+    fn embeddings_restore_input_order() {
+        let response: EmbedResp = serde_json::from_str(
+            r#"{"data":[{"index":1,"embedding":[2.0]},{"index":0,"embedding":[1.0]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            response.into_embeddings(2).unwrap(),
+            vec![vec![1.0], vec![2.0]]
+        );
+    }
+
+    #[test]
+    fn embeddings_preserve_count_and_empty_handling() {
+        let empty: EmbedResp = serde_json::from_str(r#"{"data":[]}"#).unwrap();
+        assert!(empty.into_embeddings(0).unwrap().is_empty());
+        let missing: EmbedResp = serde_json::from_str(r#"{"data":[]}"#).unwrap();
+        assert!(missing
+            .into_embeddings(1)
+            .unwrap_err()
+            .to_string()
+            .contains("count mismatch"));
     }
 }
