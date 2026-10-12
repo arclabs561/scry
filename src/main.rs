@@ -4,8 +4,8 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use futures::stream::StreamExt;
 use scry::{
-    argsort_desc, cache::Cache, cluster_labels, corpus, cosine_scores, embed_code, embed_texts,
-    github, l2_normalize, medoid_labels, openrouter::Client, plan_scopes, RRF_K,
+    argsort_desc, cache::Cache, cluster_labels, corpus, cosine_scores, embed_code_with_options,
+    embed_texts, github, l2_normalize, medoid_labels, openrouter::Client, plan_scopes, RRF_K,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -46,6 +46,9 @@ struct Cli {
     /// Embedding surface: `readme` (instruction-scoped) or `code` (source files).
     #[arg(long, global = true, default_value = "readme")]
     surface: String,
+    /// Include source ignored by project .gitignore/.ignore (hard exclusions still apply).
+    #[arg(long, global = true)]
+    include_ignored: bool,
     /// Model for the `code` surface.
     #[arg(long, global = true, default_value = "mistralai/codestral-embed-2505")]
     code_model: String,
@@ -55,6 +58,28 @@ struct Cli {
     provider: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+impl Cli {
+    /// Shared producer boundary for every local code surface route.
+    async fn code_embeddings(
+        &self,
+        client: &Client,
+        cache: &Cache,
+        projects: &[corpus::Project],
+    ) -> Result<scry::CodeEmbeddings> {
+        let mut options = scry::code::SourceOptions::default();
+        options.include_ignored = self.include_ignored;
+        embed_code_with_options(
+            client,
+            cache,
+            &self.code_model,
+            self.dimensions,
+            projects,
+            options,
+        )
+        .await
+    }
 }
 
 #[derive(Subcommand)]
@@ -350,8 +375,7 @@ async fn main() -> Result<()> {
             let mut clusters_json = serde_json::Map::new();
 
             if cli.surface == "code" {
-                let mat =
-                    embed_code(&client, &cache, &cli.code_model, cli.dimensions, &projects).await?;
+                let mat = cli.code_embeddings(&client, &cache, &projects).await?;
                 let (capped, codeless) = (mat.capped, mat.codeless());
                 eprintln!(
                     "{} projects · surface=code · model={} · {capped} capped / {codeless} codeless",
@@ -366,8 +390,7 @@ async fn main() -> Result<()> {
                 let scopes = parse_scopes(scopes)?;
                 // For `both`, embed code once and concatenate it onto each scope.
                 let code_mat = if cli.surface == "both" {
-                    let m = embed_code(&client, &cache, &cli.code_model, cli.dimensions, &projects)
-                        .await?;
+                    let m = cli.code_embeddings(&client, &cache, &projects).await?;
                     let (capped, codeless) = (m.capped, m.codeless());
                     eprintln!("surface=both · code {capped} capped / {codeless} codeless");
                     Some(m)
@@ -424,9 +447,7 @@ async fn main() -> Result<()> {
             let names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
             let (scores, scope_label) = match cli.surface.as_str() {
                 "code" => {
-                    let docs =
-                        embed_code(&client, &cache, &cli.code_model, cli.dimensions, &projects)
-                            .await?;
+                    let docs = cli.code_embeddings(&client, &cache, &projects).await?;
                     let (capped, codeless) = (docs.capped, docs.codeless());
                     eprintln!(
                         "surface=code · model={} · {capped} capped / {codeless} codeless",
@@ -458,9 +479,7 @@ async fn main() -> Result<()> {
                         &[corpus::format_input(&instr, text)],
                     )
                     .await?;
-                    let c_docs =
-                        embed_code(&client, &cache, &cli.code_model, cli.dimensions, &projects)
-                            .await?;
+                    let c_docs = cli.code_embeddings(&client, &cache, &projects).await?;
                     let (capped, codeless) = (c_docs.capped, c_docs.codeless());
                     eprintln!("surface=both · code {capped} capped / {codeless} codeless");
                     let c_q = embed_texts(
@@ -580,8 +599,7 @@ async fn main() -> Result<()> {
                 }
             }
             if use_code {
-                let c_docs =
-                    embed_code(&client, &cache, &cli.code_model, cli.dimensions, &projects).await?;
+                let c_docs = cli.code_embeddings(&client, &cache, &projects).await?;
                 let (capped, codeless) = (c_docs.capped, c_docs.codeless());
                 eprintln!("code lens · {capped} capped / {codeless} codeless");
                 let c_q = embed_texts(
@@ -875,7 +893,84 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scry::code;
+    use scry::{code, embed_code};
+
+    #[tokio::test]
+    async fn source_selection_cli_routes_reach_cached_producer() {
+        std::env::set_var("OPENROUTER_API_KEY", "offline-synthetic-unused");
+        let root = std::env::temp_dir().join(format!(
+            "scry-source-options-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dir = root.join("project");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(dir.join("lib.rs"), "fn visible() {}").unwrap();
+        std::fs::write(dir.join("ignored.rs"), "fn ignored() {}").unwrap();
+        let model = "offline-selection-fixture";
+        let cache = Cache::load(root.join("cache.json"));
+        for (text, value) in [("fn visible() {}", 2.0), ("fn ignored() {}", 10.0)] {
+            cache.insert(Cache::key(model, None, None, text), vec![value]);
+        }
+        let client = Client::from_env().unwrap();
+        let projects = [corpus::Project {
+            name: "project".into(),
+            dir,
+            readme: "fixture".into(),
+        }];
+        // Preflight both possible source inputs: a cache miss must never be
+        // needed, even for the explicit override. Runtime is also run with
+        // network denied as an independent acceptance gate.
+        let mut all = code::SourceOptions::default();
+        all.include_ignored = true;
+        let keys: Vec<_> = code::list_source_files_with_options(&projects[0].dir, all)
+            .into_iter()
+            .flat_map(|p| code::chunk_text(&std::fs::read_to_string(p).unwrap(), code::CHUNK_CHARS))
+            .map(|text| Cache::key(model, None, None, &text))
+            .collect();
+        assert_eq!(cache.contains_each(&keys), [true, true]);
+        assert_eq!(
+            embed_code(&client, &cache, model, None, &projects)
+                .await
+                .unwrap()
+                .vectors,
+            [Some(vec![2.0])]
+        );
+        let mut expected_hits = 1;
+        for command in ["query", "cluster", "ask"] {
+            for surface in ["code", "both"] {
+                for include in [false, true] {
+                    let mut args =
+                        vec!["scry", "--surface", surface, "--code-model", model, command];
+                    if command != "cluster" {
+                        args.push("synthetic question");
+                    }
+                    // Global override also works after the subcommand.
+                    if include {
+                        args.push("--include-ignored");
+                    }
+                    let cli = Cli::try_parse_from(args).unwrap();
+                    let result = cli
+                        .code_embeddings(&client, &cache, &projects)
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        result.vectors,
+                        [Some(vec![if include { 6.0 } else { 2.0 }])],
+                        "{command}/{surface}/override={include}"
+                    );
+                    expected_hits += if include { 2 } else { 1 };
+                    assert_eq!((cache.hits(), cache.misses()), (expected_hits, 0));
+                    assert_eq!((result.capped, result.codeless()), (0, 0));
+                }
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn cached_code_absence_stays_distinct_through_cli_ranking_and_clustering() {

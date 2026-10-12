@@ -87,7 +87,12 @@ embeds the most representative ones first: entry points (`lib.rs` / `main.rs` /
 `mod.rs` / `__init__.py`), then anything under `src/`, skipping `benches/`,
 `tests/`, `examples/`, `archive/`, `docs/`, and vendored/build trees (they
 otherwise crowd out the real API within the per-project chunk cap). Chunks are
-mean-pooled per project. iCloud-offloaded files are skipped. Projects with no
+mean-pooled per project. Project-local `.gitignore` and `.ignore` rules apply by
+default, including nested rules and negation. Use `--include-ignored` with code
+or both surfaces to include ignored source; hard directory exclusions, source
+symlink exclusion, and file/chunk limits still apply. Parent/global ignore
+rules and `.git/info/exclude` are not loaded; local ignore files retain standard
+semantics, including linked ignore configuration. iCloud-offloaded files are skipped. Projects with no
 readable source retain their original identity but have no code representation;
 this differs from a valid embedding whose coordinates happen to be zero.
 Code-only query and ask results put missing rows last with a JSON `null` score
