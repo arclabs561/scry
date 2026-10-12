@@ -163,6 +163,27 @@ pub async fn embed_code(
     dimensions: Option<u32>,
     projects: &[Project],
 ) -> Result<CodeEmbeddings> {
+    embed_code_with_options(
+        client,
+        cache,
+        model,
+        dimensions,
+        projects,
+        code::SourceOptions::default(),
+    )
+    .await
+}
+
+/// Embed source using explicit selection options; pooling and absence semantics
+/// are identical to [`embed_code`]. Ignore rules are applied before file reads.
+pub async fn embed_code_with_options(
+    client: &Client,
+    cache: &Cache,
+    model: &str,
+    dimensions: Option<u32>,
+    projects: &[Project],
+    options: code::SourceOptions,
+) -> Result<CodeEmbeddings> {
     let mut all_chunks: Vec<String> = Vec::new();
     let mut counts: Vec<usize> = Vec::with_capacity(projects.len());
     let mut capped = 0usize;
@@ -170,7 +191,7 @@ pub async fn embed_code(
     for p in projects {
         let mut chunks: Vec<String> = Vec::new();
         let mut was_capped = false;
-        for f in code::list_source_files(&p.dir) {
+        for f in code::list_source_files_with_options(&p.dir, options) {
             if chunks.len() >= code::MAX_CHUNKS {
                 was_capped = true;
                 break;
