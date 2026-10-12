@@ -49,7 +49,7 @@ pub const MAX_CHUNKS: usize = 48;
 pub const CHUNK_CHARS: usize = MAX_CHUNK_CHARS;
 
 /// List source files under `dir` (recursive), sorted. Skips build/vendor dirs,
-/// symlinks (no loop-following), and files larger than [`MAX_FILE_BYTES`].
+/// symlinks (no loop-following), and files larger than `MAX_FILE_BYTES`.
 pub fn list_source_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     collect_files(dir, &mut files);

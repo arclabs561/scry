@@ -41,7 +41,7 @@ pub const RRF_K: f32 = 60.0;
 /// Embed `texts`, returning one vector per input, embedding only cache misses.
 ///
 /// Misses are batched and the batches run concurrently (bounded by
-/// [`CONCURRENCY`]). The cache is consulted per unique text, so repeated inputs
+/// `CONCURRENCY`). The cache is consulted per unique text, so repeated inputs
 /// cost nothing, and it is saved once after the misses resolve.
 pub async fn embed_texts(
     client: &Client,
@@ -106,18 +106,63 @@ async fn read_file_bounded(path: std::path::PathBuf) -> Option<String> {
     }
 }
 
-/// Embed the `code` surface: one mean-pooled vector per project, built from its
-/// source-file chunks (embedded with `model`, typically a code model). Chunks
-/// are embedded through the same cache. Returns `(vectors, capped, codeless)`:
-/// how many projects hit the per-project chunk cap, and how many had no source
-/// at all (those get a zero vector and sort last / cluster as noise).
+/// Code representations aligned with the original project order.
+/// `None` means no readable source chunks, distinct from a valid zero vector.
+#[derive(Debug)]
+pub struct CodeEmbeddings {
+    pub vectors: Vec<Option<Vec<f32>>>,
+    /// Projects whose readable source exceeds the per-project chunk cap.
+    pub capped: usize,
+}
+
+impl CodeEmbeddings {
+    /// Number of projects without a code representation.
+    pub fn codeless(&self) -> usize {
+        self.vectors.iter().filter(|v| v.is_none()).count()
+    }
+
+    /// Per-project cosine scores, retaining absence rather than inventing a score.
+    pub fn scores(&self, query: &[f32]) -> Vec<Option<f32>> {
+        self.vectors
+            .iter()
+            .map(|v| {
+                v.as_ref()
+                    .map(|v| cosine_scores(std::slice::from_ref(v), query)[0])
+            })
+            .collect()
+    }
+
+    /// Joint README/code clustering features. Missing code contributes a zero
+    /// extension; its README representation remains available. This does not turn
+    /// absent code into a standalone code representation.
+    pub fn with_readme(&self, readme: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        assert_eq!(readme.len(), self.vectors.len());
+        let dim = self.vectors.iter().flatten().next().map_or(0, Vec::len);
+        readme
+            .iter()
+            .zip(&self.vectors)
+            .map(|(r, c)| {
+                let mut row = l2_normalize(r);
+                match c {
+                    Some(c) => row.extend(l2_normalize(c)),
+                    None => row.resize(row.len() + dim, 0.0),
+                }
+                row
+            })
+            .collect()
+    }
+}
+
+/// Embed readable source chunks, mean-pooled per project. Missing code is `None`;
+/// callers retain its identity without ranking or clustering a fabricated vector.
+/// All-codeless input returns aligned absent rows without embedding a batch.
 pub async fn embed_code(
     client: &Client,
     cache: &Cache,
     model: &str,
     dimensions: Option<u32>,
     projects: &[Project],
-) -> Result<(Vec<Vec<f32>>, usize, usize)> {
+) -> Result<CodeEmbeddings> {
     let mut all_chunks: Vec<String> = Vec::new();
     let mut counts: Vec<usize> = Vec::with_capacity(projects.len());
     let mut capped = 0usize;
@@ -149,18 +194,19 @@ pub async fn embed_code(
     }
     eprintln!("gathered {} chunks; embedding...", all_chunks.len());
     if all_chunks.is_empty() {
-        anyhow::bail!("no source files found under any project");
+        return Ok(CodeEmbeddings {
+            vectors: vec![None; projects.len()],
+            capped,
+        });
     }
     let chunk_vecs = embed_texts(client, cache, model, dimensions, &all_chunks).await?;
     let dim = chunk_vecs[0].len();
 
     let mut vectors = Vec::with_capacity(projects.len());
-    let mut codeless = 0usize;
     let mut offset = 0usize;
     for &count in &counts {
         if count == 0 {
-            codeless += 1;
-            vectors.push(vec![0.0f32; dim]);
+            vectors.push(None);
             continue;
         }
         let mut pooled = vec![0.0f32; dim];
@@ -172,10 +218,10 @@ pub async fn embed_code(
         for acc in &mut pooled {
             *acc /= count as f32;
         }
-        vectors.push(pooled);
+        vectors.push(Some(pooled));
         offset += count;
     }
-    Ok((vectors, capped, codeless))
+    Ok(CodeEmbeddings { vectors, capped })
 }
 
 /// L2-normalize a vector (zero vectors are left unchanged).

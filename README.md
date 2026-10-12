@@ -87,7 +87,13 @@ embeds the most representative ones first: entry points (`lib.rs` / `main.rs` /
 `mod.rs` / `__init__.py`), then anything under `src/`, skipping `benches/`,
 `tests/`, `examples/`, `archive/`, `docs/`, and vendored/build trees (they
 otherwise crowd out the real API within the per-project chunk cap). Chunks are
-mean-pooled to one vector per project. iCloud-offloaded files are skipped.
+mean-pooled per project. iCloud-offloaded files are skipped. Projects with no
+readable source retain their original identity but have no code representation;
+this differs from a valid embedding whose coordinates happen to be zero.
+Code-only query and ask results put missing rows last with a JSON `null` score
+(`n/a` in text). Missing code supplies no vote to readme/code fusion. Code-only
+clustering excludes these rows and maps them back to noise (`-1`); joint
+readme/code clustering keeps their README with a zero code extension.
 
 The `both` surface combines README and code: for `query` it Reciprocal-Rank-Fuses the
 readme and code rankings, and for `cluster` it concatenates the L2-normalized
@@ -117,6 +123,12 @@ per-scope `rank` and `cosine`, so a consuming agent sees which lens drove a hit:
 
 `scry mcp` serves the current corpus over stdio with `scry_query` and
 `scry_ask` tools.
+
+## Library API
+
+Version 0.2 changes `embed_code` to return `CodeEmbeddings`, with one optional
+vector per original project. `None` means no readable source; a present zero
+vector remains valid. This source utility remains unpublished (`publish = false`).
 
 ## Cache
 

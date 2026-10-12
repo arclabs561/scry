@@ -4,9 +4,8 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use futures::stream::StreamExt;
 use scry::{
-    argsort_desc, cache::Cache, cluster_labels, concat_normalized, corpus, cosine_scores,
-    embed_code, embed_texts, github, l2_normalize, medoid_labels, openrouter::Client, plan_scopes,
-    ranks_desc, rrf_fuse,
+    argsort_desc, cache::Cache, cluster_labels, corpus, cosine_scores, embed_code, embed_texts,
+    github, l2_normalize, medoid_labels, openrouter::Client, plan_scopes, RRF_K,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -162,12 +161,14 @@ fn backtick_tokens(s: &str) -> Vec<String> {
 /// Cluster one matrix, print the groups under `title`, and return the JSON.
 fn cluster_and_emit(
     title: &str,
-    mat: &[Vec<f32>],
+    mat: &[Option<Vec<f32>>],
     k: Option<usize>,
     names: &[String],
 ) -> Result<serde_json::Value> {
-    let labels = cluster_labels(mat, k)?;
-    let medoid = medoid_labels(mat, &labels, names);
+    let ClusteredRows {
+        labels,
+        medoids: medoid,
+    } = cluster_available(mat, names, |rows| cluster_labels(rows, k))?;
     let mut groups: BTreeMap<i64, Vec<String>> = BTreeMap::new();
     for (n, lab) in names.iter().zip(&labels) {
         groups
@@ -205,35 +206,100 @@ fn cluster_and_emit(
     Ok(serde_json::json!({ "labels": label_map, "groups": group_json }))
 }
 
-/// Fold one lens's scores into the `ask` accumulators: append the per-project
-/// detail, push the rank list, and (for max/mean) update the running fused score.
-#[allow(clippy::too_many_arguments)]
+struct ClusteredRows {
+    labels: Vec<Option<usize>>,
+    medoids: BTreeMap<i64, String>,
+}
+
+/// Exclude absent representations before clustering, then restore original IDs.
+/// The injected operation is the actual clustering boundary, also exercised by tests.
+fn cluster_available(
+    rows: &[Option<Vec<f32>>],
+    names: &[String],
+    cluster: impl FnOnce(&[Vec<f32>]) -> Result<Vec<Option<usize>>>,
+) -> Result<ClusteredRows> {
+    let indices: Vec<_> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, v)| v.as_ref().map(|_| i))
+        .collect();
+    let available: Vec<_> = indices.iter().map(|&i| rows[i].clone().unwrap()).collect();
+    let available_names: Vec<_> = indices.iter().map(|&i| names[i].clone()).collect();
+    let mut labels = vec![None; rows.len()];
+    if available.is_empty() {
+        return Ok(ClusteredRows {
+            labels,
+            medoids: BTreeMap::new(),
+        });
+    }
+    let selected = cluster(&available)?;
+    anyhow::ensure!(
+        selected.len() == indices.len(),
+        "cluster label count mismatch"
+    );
+    let medoids = medoid_labels(&available, &selected, &available_names);
+    for (i, label) in indices.into_iter().zip(selected) {
+        labels[i] = label;
+    }
+    Ok(ClusteredRows { labels, medoids })
+}
+
+/// Descending available scores followed by absent rows, preserving original IDs.
+fn rank_optional(scores: &[Option<f32>]) -> Vec<usize> {
+    let present: Vec<_> = scores
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.map(|s| (i, s)))
+        .collect();
+    let values: Vec<_> = present.iter().map(|(_, s)| *s).collect();
+    let mut order: Vec<_> = argsort_desc(&values)
+        .into_iter()
+        .map(|i| present[i].0)
+        .collect();
+    order.extend(
+        scores
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.is_none().then_some(i)),
+    );
+    order
+}
+
+/// Fold only represented scores into the actual query/ask accumulators.
 fn fold_lens(
     label: &str,
-    scores: &[f32],
-    n: usize,
+    scores: &[Option<f32>],
     combine: &str,
     detail: &mut [Vec<serde_json::Value>],
-    rank_lists: &mut Vec<Vec<usize>>,
-    fused: &mut [f32],
+    fused: &mut [Option<f32>],
 ) {
-    let mut rank_of = vec![0usize; n];
-    for (r, &i) in argsort_desc(scores).iter().enumerate() {
-        rank_of[i] = r;
-    }
-    for (i, d) in detail.iter_mut().enumerate() {
-        d.push(serde_json::json!({
-            "scope": label,
-            "rank": rank_of[i],
-            "cosine": (scores[i] * 1e4).round() / 1e4,
+    for (rank, i) in rank_optional(scores).into_iter().enumerate() {
+        let Some(score) = scores[i] else { continue };
+        detail[i].push(serde_json::json!({
+            "scope": label, "rank": rank, "cosine": (score * 1e4).round() / 1e4,
         }));
-        match combine {
-            "max" => fused[i] = fused[i].max(scores[i]),
-            "mean" => fused[i] += scores[i],
-            _ => {}
+        let value = match combine {
+            "rrf" => 1.0 / (RRF_K + (rank + 1) as f32),
+            _ => score,
+        };
+        fused[i] = Some(match (combine, fused[i]) {
+            ("max", Some(previous)) => previous.max(value),
+            (_, Some(previous)) => previous + value,
+            (_, None) => value,
+        });
+    }
+}
+
+fn finish_mean(fused: &mut [Option<f32>], detail: &[Vec<serde_json::Value>]) {
+    for (score, lenses) in fused.iter_mut().zip(detail) {
+        if let Some(score) = score {
+            *score /= lenses.len() as f32;
         }
     }
-    rank_lists.push(rank_of);
+}
+
+fn score_text(score: Option<f32>) -> String {
+    score.map_or_else(|| "n/a".into(), |s| format!("{s:.4}"))
 }
 
 #[tokio::main]
@@ -284,8 +350,9 @@ async fn main() -> Result<()> {
             let mut clusters_json = serde_json::Map::new();
 
             if cli.surface == "code" {
-                let (mat, capped, codeless) =
+                let mat =
                     embed_code(&client, &cache, &cli.code_model, cli.dimensions, &projects).await?;
+                let (capped, codeless) = (mat.capped, mat.codeless());
                 eprintln!(
                     "{} projects · surface=code · model={} · {capped} capped / {codeless} codeless",
                     projects.len(),
@@ -293,15 +360,15 @@ async fn main() -> Result<()> {
                 );
                 clusters_json.insert(
                     "code".into(),
-                    cluster_and_emit("surface: code", &mat, *k, &names)?,
+                    cluster_and_emit("surface: code", &mat.vectors, *k, &names)?,
                 );
             } else {
                 let scopes = parse_scopes(scopes)?;
                 // For `both`, embed code once and concatenate it onto each scope.
                 let code_mat = if cli.surface == "both" {
-                    let (m, capped, codeless) =
-                        embed_code(&client, &cache, &cli.code_model, cli.dimensions, &projects)
-                            .await?;
+                    let m = embed_code(&client, &cache, &cli.code_model, cli.dimensions, &projects)
+                        .await?;
+                    let (capped, codeless) = (m.capped, m.codeless());
                     eprintln!("surface=both · code {capped} capped / {codeless} codeless");
                     Some(m)
                 } else {
@@ -321,10 +388,18 @@ async fn main() -> Result<()> {
                     let r_mat =
                         embed_texts(&client, &cache, &cli.model, cli.dimensions, &inputs).await?;
                     let (mat, title) = match &code_mat {
-                        Some(c) => (concat_normalized(&r_mat, c), format!("scope+code: {name}")),
+                        Some(c) => (c.with_readme(&r_mat), format!("scope+code: {name}")),
                         None => (r_mat, format!("scope: {name}")),
                     };
-                    clusters_json.insert(name.clone(), cluster_and_emit(&title, &mat, *k, &names)?);
+                    clusters_json.insert(
+                        name.clone(),
+                        cluster_and_emit(
+                            &title,
+                            &mat.into_iter().map(Some).collect::<Vec<_>>(),
+                            *k,
+                            &names,
+                        )?,
+                    );
                 }
             }
             std::fs::create_dir_all(out)?;
@@ -349,9 +424,10 @@ async fn main() -> Result<()> {
             let names: Vec<String> = projects.iter().map(|p| p.name.clone()).collect();
             let (scores, scope_label) = match cli.surface.as_str() {
                 "code" => {
-                    let (docs, capped, codeless) =
+                    let docs =
                         embed_code(&client, &cache, &cli.code_model, cli.dimensions, &projects)
                             .await?;
+                    let (capped, codeless) = (docs.capped, docs.codeless());
                     eprintln!(
                         "surface=code · model={} · {capped} capped / {codeless} codeless",
                         cli.code_model
@@ -364,7 +440,7 @@ async fn main() -> Result<()> {
                         std::slice::from_ref(text),
                     )
                     .await?;
-                    (cosine_scores(&docs, &qv[0]), "code".to_string())
+                    (docs.scores(&qv[0]), "code".to_string())
                 }
                 "both" => {
                     let instr = corpus::resolve_scope(scope);
@@ -382,9 +458,10 @@ async fn main() -> Result<()> {
                         &[corpus::format_input(&instr, text)],
                     )
                     .await?;
-                    let (c_docs, capped, codeless) =
+                    let c_docs =
                         embed_code(&client, &cache, &cli.code_model, cli.dimensions, &projects)
                             .await?;
+                    let (capped, codeless) = (c_docs.capped, c_docs.codeless());
                     eprintln!("surface=both · code {capped} capped / {codeless} codeless");
                     let c_q = embed_texts(
                         &client,
@@ -394,12 +471,21 @@ async fn main() -> Result<()> {
                         std::slice::from_ref(text),
                     )
                     .await?;
-                    let r_ranks = ranks_desc(&cosine_scores(&r_docs, &r_q[0]));
-                    let c_ranks = ranks_desc(&cosine_scores(&c_docs, &c_q[0]));
-                    (
-                        rrf_fuse(&[r_ranks, c_ranks], names.len()),
-                        "both".to_string(),
-                    )
+                    let mut fused = vec![None; names.len()];
+                    let mut detail = vec![Vec::new(); names.len()];
+                    let readme_scores = cosine_scores(&r_docs, &r_q[0])
+                        .into_iter()
+                        .map(Some)
+                        .collect::<Vec<_>>();
+                    fold_lens("readme", &readme_scores, "rrf", &mut detail, &mut fused);
+                    fold_lens(
+                        "code",
+                        &c_docs.scores(&c_q[0]),
+                        "rrf",
+                        &mut detail,
+                        &mut fused,
+                    );
+                    (fused, "both".to_string())
                 }
                 _ => {
                     let instr = corpus::resolve_scope(scope);
@@ -418,15 +504,18 @@ async fn main() -> Result<()> {
                         &[corpus::format_input(&instr, text)],
                     )
                     .await?;
-                    (cosine_scores(&docs, &qv[0]), instr)
+                    (
+                        cosine_scores(&docs, &qv[0]).into_iter().map(Some).collect(),
+                        instr,
+                    )
                 }
             };
-            let order = argsort_desc(&scores);
+            let order = rank_optional(&scores);
 
             let results: Vec<_> = order
                 .iter()
                 .take(*top)
-                .map(|&i| serde_json::json!({ "project": names[i], "score": (scores[i] * 1e4).round() / 1e4 }))
+                .map(|&i| serde_json::json!({ "project": names[i], "score": scores[i].map(|s| (s * 1e4).round() / 1e4) }))
                 .collect();
             if *json {
                 println!(
@@ -436,7 +525,7 @@ async fn main() -> Result<()> {
             } else {
                 eprintln!("query: {text:?}\nscope: {scope_label:?}");
                 for &i in order.iter().take(*top) {
-                    println!("  {:.4}  {}", scores[i], names[i]);
+                    println!("  {}  {}", score_text(scores[i]), names[i]);
                 }
             }
             eprintln!("cache: {} hit / {} miss", cache.hits(), cache.misses());
@@ -463,9 +552,8 @@ async fn main() -> Result<()> {
 
             let use_readme = cli.surface != "code";
             let use_code = cli.surface != "readme";
-            let mut fused = vec![0.0f32; n];
+            let mut fused = vec![None; n];
             let mut per_scope_detail: Vec<Vec<serde_json::Value>> = vec![Vec::new(); n];
-            let mut rank_lists: Vec<Vec<usize>> = Vec::new();
 
             if use_readme {
                 for instr in &scopes {
@@ -484,21 +572,17 @@ async fn main() -> Result<()> {
                         &[corpus::format_input(instr, &query)],
                     )
                     .await?;
-                    let s = cosine_scores(&docs, &qv[0]);
-                    fold_lens(
-                        instr,
-                        &s,
-                        n,
-                        combine,
-                        &mut per_scope_detail,
-                        &mut rank_lists,
-                        &mut fused,
-                    );
+                    let s = cosine_scores(&docs, &qv[0])
+                        .into_iter()
+                        .map(Some)
+                        .collect::<Vec<_>>();
+                    fold_lens(instr, &s, combine, &mut per_scope_detail, &mut fused);
                 }
             }
             if use_code {
-                let (c_docs, capped, codeless) =
+                let c_docs =
                     embed_code(&client, &cache, &cli.code_model, cli.dimensions, &projects).await?;
+                let (capped, codeless) = (c_docs.capped, c_docs.codeless());
                 eprintln!("code lens · {capped} capped / {codeless} codeless");
                 let c_q = embed_texts(
                     &client,
@@ -508,33 +592,22 @@ async fn main() -> Result<()> {
                     std::slice::from_ref(&query),
                 )
                 .await?;
-                let s = cosine_scores(&c_docs, &c_q[0]);
-                fold_lens(
-                    "<code>",
-                    &s,
-                    n,
-                    combine,
-                    &mut per_scope_detail,
-                    &mut rank_lists,
-                    &mut fused,
-                );
+                let s = c_docs.scores(&c_q[0]);
+                fold_lens("<code>", &s, combine, &mut per_scope_detail, &mut fused);
             }
 
-            let lens_count = rank_lists.len().max(1) as f32;
-            match combine.as_str() {
-                "rrf" => fused = rrf_fuse(&rank_lists, n),
-                "mean" => fused.iter_mut().for_each(|f| *f /= lens_count),
-                _ => {}
+            if combine == "mean" {
+                finish_mean(&mut fused, &per_scope_detail);
             }
 
-            let order = argsort_desc(&fused);
+            let order = rank_optional(&fused);
             let results: Vec<_> = order
                 .iter()
                 .take(*top)
                 .map(|&i| {
                     serde_json::json!({
                         "project": names[i],
-                        "score": (fused[i] * 1e5).round() / 1e5,
+                        "score": fused[i].map(|s| (s * 1e5).round() / 1e5),
                         "scopes": per_scope_detail[i],
                     })
                 })
@@ -586,7 +659,7 @@ async fn main() -> Result<()> {
                     eprintln!("  lens: <code>");
                 }
                 for &i in order.iter().take(*top) {
-                    println!("  {:.4}  {}", fused[i], names[i]);
+                    println!("  {}  {}", score_text(fused[i]), names[i]);
                 }
                 if let Some(a) = &synthesized {
                     println!("\n{a}");
@@ -797,4 +870,161 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scry::code;
+
+    #[tokio::test]
+    async fn cached_code_absence_stays_distinct_through_cli_ranking_and_clustering() {
+        // This test binary never needs real credentials. Every source chunk is
+        // preseeded below before calling the production gather/embedding path.
+        std::env::set_var("OPENROUTER_API_KEY", "offline-synthetic-unused");
+        let root = std::env::temp_dir().join(format!(
+            "scry-missing-code-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let model = "offline-fixture";
+        let cache = Cache::load(root.join("cache.json"));
+        let mut projects = Vec::new();
+        for (name, source, vector) in [
+            ("negative", Some("fn negative() {}"), vec![-1.0, 0.0]),
+            ("absent", None, vec![]),
+            ("zero", Some("fn zero() {}"), vec![0.0, 0.0]),
+        ] {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            if let Some(text) = source {
+                std::fs::write(dir.join("lib.rs"), text).unwrap();
+                cache.insert(Cache::key(model, None, None, text), vector);
+            }
+            projects.push(corpus::Project {
+                name: name.into(),
+                dir,
+                readme: "fixture".into(),
+            });
+        }
+        let keys: Vec<_> = projects
+            .iter()
+            .flat_map(|p| code::list_source_files(&p.dir))
+            .flat_map(|f| code::chunk_text(&std::fs::read_to_string(f).unwrap(), code::CHUNK_CHARS))
+            .map(|text| Cache::key(model, None, None, &text))
+            .collect();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(cache.contains_each(&keys), [true, true]);
+        let client = Client::from_env().unwrap();
+        let code = embed_code(&client, &cache, model, None, &projects)
+            .await
+            .unwrap();
+        assert_eq!((cache.hits(), cache.misses()), (2, 0));
+        assert_eq!((code.capped, code.codeless()), (0, 1));
+        assert_eq!(
+            code.vectors,
+            [Some(vec![-1.0, 0.0]), None, Some(vec![0.0, 0.0])]
+        );
+        let scores = code.scores(&[1.0, 0.0]);
+        assert_eq!(scores, [Some(-1.0), None, Some(0.0)]);
+        assert_eq!(rank_optional(&scores), [2, 0, 1]);
+        assert_eq!(
+            serde_json::json!(scores),
+            serde_json::json!([-1.0, null, 0.0])
+        );
+        assert_eq!(score_text(scores[1]), "n/a");
+        let names = projects.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+        let ClusteredRows { labels, medoids } = cluster_available(&code.vectors, &names, |rows| {
+            assert_eq!(rows, [vec![-1.0, 0.0], vec![0.0, 0.0]]);
+            Ok(vec![Some(4), Some(9)])
+        })
+        .unwrap();
+        assert_eq!(labels, [Some(4), None, Some(9)]);
+        assert_eq!(medoids[&4], "negative");
+        assert_eq!(medoids[&9], "zero");
+        assert_eq!(
+            code.with_readme(&vec![vec![3.0, 4.0]; 3]),
+            [
+                vec![0.6, 0.8, -1.0, 0.0],
+                vec![0.6, 0.8, 0.0, 0.0],
+                vec![0.6, 0.8, 0.0, 0.0]
+            ]
+        );
+        let all_missing = embed_code(
+            &client,
+            &cache,
+            model,
+            None,
+            std::slice::from_ref(&projects[1]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(all_missing.vectors, [None]);
+        assert_eq!(cache.misses(), 0);
+        let ClusteredRows { labels, medoids } =
+            cluster_available(&all_missing.vectors, &["absent".into()], |_| {
+                panic!("no rows to cluster")
+            })
+            .unwrap();
+        assert_eq!(labels, [None]);
+        assert!(medoids.is_empty());
+        let emitted = cluster_and_emit(
+            "missing fixture",
+            &all_missing.vectors,
+            None,
+            &["absent".into()],
+        )
+        .unwrap();
+        assert_eq!(emitted["labels"]["absent"], -1);
+        assert_eq!(
+            emitted["groups"]["-1"]["projects"],
+            serde_json::json!(["absent"])
+        );
+        assert!(emitted["groups"]["-1"]["medoid"].is_null());
+        assert_eq!(all_missing.with_readme(&[vec![3.0, 4.0]]), [vec![0.6, 0.8]]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn query_and_ask_fusion_skip_absent_votes_and_keep_project_identity() {
+        let readme = [Some(-0.4), Some(0.2), Some(0.5)];
+        let code = [Some(-1.0), None, Some(0.0)];
+        for combine in ["rrf", "mean", "max"] {
+            let mut detail = vec![vec![]; 3];
+            let mut fused = vec![None; 3];
+            fold_lens("readme", &readme, combine, &mut detail, &mut fused);
+            fold_lens("code", &code, combine, &mut detail, &mut fused);
+            if combine == "mean" {
+                finish_mean(&mut fused, &detail);
+            }
+            assert_eq!(
+                detail[1].len(),
+                1,
+                "missing code must not vote or alter the mean divisor"
+            );
+            assert_eq!(detail[1][0]["scope"], "readme");
+            assert_eq!(detail[0][1]["rank"], 1);
+            assert_eq!(detail[2][1]["rank"], 0);
+            let expected = match combine {
+                "rrf" => [1.0 / 63.0 + 1.0 / 62.0, 1.0 / 62.0, 2.0 / 61.0],
+                "mean" => [-0.7, 0.2, 0.25],
+                _ => [-0.4, 0.2, 0.5],
+            };
+            for (actual, expected) in fused.iter().zip(expected) {
+                assert!((actual.unwrap() - expected).abs() < 1e-6);
+            }
+            let mut only_code = vec![None; 3];
+            let mut detail = vec![vec![]; 3];
+            fold_lens("code", &code, combine, &mut detail, &mut only_code);
+            if combine == "mean" {
+                finish_mean(&mut only_code, &detail);
+            }
+            assert_eq!(only_code[1], None);
+            assert_eq!(rank_optional(&only_code), [2, 0, 1]);
+            assert!(detail[1].is_empty());
+        }
+    }
 }
