@@ -43,6 +43,8 @@ pub const RRF_K: f32 = 60.0;
 /// Misses are batched and the batches run concurrently (bounded by
 /// `CONCURRENCY`). The cache is consulted per unique text, so repeated inputs
 /// cost nothing, and it is saved once after the misses resolve.
+/// Explicit dimensions must be positive. Cached width mismatches return an
+/// error before requesting misses; invalid entries are not re-embedded.
 pub async fn embed_texts(
     client: &Client,
     cache: &Cache,
@@ -50,12 +52,20 @@ pub async fn embed_texts(
     dimensions: Option<u32>,
     texts: &[String],
 ) -> Result<Vec<Vec<f32>>> {
+    let width = openrouter::requested_width(dimensions)?;
     let provider = client.provider();
     let keys: Vec<String> = texts
         .iter()
         .map(|t| Cache::key(model, provider, dimensions, t))
         .collect();
     let present = cache.contains_each(&keys);
+    if width.is_some() {
+        for (row, (vector, &present)) in cache.get_each(&keys).iter().zip(&present).enumerate() {
+            if present {
+                openrouter::check_width(vector, width, row)?;
+            }
+        }
+    }
     let hits = present.iter().filter(|&&p| p).count();
     cache.add_hits(hits);
     cache.add_misses(keys.len() - hits);
@@ -92,7 +102,21 @@ pub async fn embed_texts(
         cache.save().context("save cache")?;
     }
 
-    Ok(cache.get_each(&keys))
+    cached_embeddings(cache, &keys, width)
+}
+
+// Validate the returned snapshot too: another caller may replace an entry
+// while this call awaits its missing batches.
+fn cached_embeddings(
+    cache: &Cache,
+    keys: &[String],
+    width: Option<usize>,
+) -> Result<Vec<Vec<f32>>> {
+    let vectors = cache.get_each(keys);
+    for (row, vector) in vectors.iter().enumerate() {
+        openrouter::check_width(vector, width, row)?;
+    }
+    Ok(vectors)
 }
 
 /// Read a file with a hard timeout, returning `None` on timeout or error so the
