@@ -1,7 +1,7 @@
 # Changelog
 
-Earlier history has not been reconstructed here. This utility is not published
-to crates.io; the entries below identify source changes, not package releases.
+Earlier history has not been reconstructed here. The entries below identify
+source changes without assigning package releases.
 
 ## Source history
 
