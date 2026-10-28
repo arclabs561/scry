@@ -14,9 +14,11 @@ what they do, how they work, or the field they belong to.
 ## Install
 
 ```sh
-cargo build --release          # binary at target/release/scry
-export OPENROUTER_API_KEY=...   # from your environment
+cargo build --release
+export PATH="$PWD/target/release:$PATH"
 ```
+
+Set `OPENROUTER_API_KEY` in your environment before running queries.
 
 ## Corpus
 
@@ -137,8 +139,8 @@ vector remains valid. This source utility remains unpublished (`publish = false`
 
 ## Cache
 
-`~/.cache/scry/embeddings.json`, keyed by SHA-256 of `(model, dimensions, exact
-input text)`. The scope instruction is part of the input, so changing the lens
+`~/.cache/scry/embeddings.json`, keyed by SHA-256 of `(model, provider, dimensions,
+exact input text)`. The scope instruction is part of the input, so changing the lens
 correctly produces new embeddings. Each run prints `cache: N hit / M miss`.
 
 ## License
