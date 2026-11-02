@@ -1,6 +1,6 @@
 # scry
 
-Search and cluster a set of project READMEs.
+Search and cluster project READMEs.
 
 `scry` builds embeddings for local project directories or public GitHub repos,
 then ranks, clusters, or answers questions over that corpus. It can embed README
@@ -18,17 +18,21 @@ cargo build --release
 export PATH="$PWD/target/release:$PATH"
 ```
 
-Set `OPENROUTER_API_KEY` in your environment before running queries.
+Set `OPENROUTER_API_KEY` in your environment before running queries. `scry`
+is not published to crates.io (the name belongs to another project).
 
 ## Corpus
 
 By default the corpus is the local project dirs under `--root`. Point `--github
 <user>` at any GitHub user to use their public repos instead (description +
 topics + README per repo, `readme` surface only; there is no local tree for the
-code surface). Forks and archived repos are excluded unless `--include-forks`.
-The fetched corpus is cached per user under `~/.cache/scry/github/`; pass
-`--refresh` to refetch. Auth comes from `GITHUB_TOKEN` or `gh auth token`
-(5000/hr; unauthenticated 60/hr is fine for small users).
+code surface). `--github-org <org>`, `--stars <user>` (starred repos), and
+`--repos owner/a,owner/b` select other GitHub corpora the same way. Archived
+repos are excluded except from an explicit `--repos` list; forks are excluded
+from `--github` and `--github-org` unless `--include-forks`. The fetched corpus
+is cached under `~/.cache/scry/github/`; pass `--refresh` to refetch. Auth comes
+from `GITHUB_TOKEN` or `gh auth token` (5000/hr; unauthenticated 60/hr is fine
+for small users).
 
 ```sh
 scry --github BurntSushi query "regular expression engine"
@@ -94,9 +98,9 @@ default, including nested rules and negation. Use `--include-ignored` with code
 or both surfaces to include ignored source; hard directory exclusions, source
 symlink exclusion, and file/chunk limits still apply. Parent/global ignore
 rules and `.git/info/exclude` are not loaded; local ignore files retain standard
-semantics, including linked ignore configuration. iCloud-offloaded files are skipped. Projects with no
-readable source retain their original identity but have no code representation;
-this differs from a valid embedding whose coordinates happen to be zero.
+semantics, including linked ignore configuration. iCloud-offloaded files are
+skipped. Projects with no readable source retain their original identity but
+have no code representation; this differs from a valid embedding whose coordinates happen to be zero.
 Code-only query and ask results put missing rows last with a JSON `null` score
 (`n/a` in text). Missing code supplies no vote to readme/code fusion. Code-only
 clustering excludes these rows and maps them back to noise (`-1`); joint
@@ -123,19 +127,13 @@ per-scope `rank` and `cosine`, so a consuming agent sees which lens drove a hit:
 ## Models (all on OpenRouter)
 
 - Default embeddings: `qwen/qwen3-embedding-8b` (4096-dim, 32k context).
-- Code-aware embeddings: `mistralai/codestral-embed-2505`, `google/gemini-embedding-2`.
+- Code embeddings: `mistralai/codestral-embed-2505`.
 - Planner (`ask`): any chat model via `--planner` (default `openai/gpt-4o-mini`).
 
 ## MCP
 
 `scry mcp` serves the current corpus over stdio with `scry_query` and
 `scry_ask` tools.
-
-## Library API
-
-Version 0.2 changes `embed_code` to return `CodeEmbeddings`, with one optional
-vector per original project. `None` means no readable source; a present zero
-vector remains valid. This source utility remains unpublished (`publish = false`).
 
 ## Cache
 
