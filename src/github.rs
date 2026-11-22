@@ -91,9 +91,20 @@ fn write_cache(key: &str, projects: &[Project]) {
     }
 }
 
-/// A user's owned repos. Forks/archived excluded unless `include_forks`.
+// Older owner-list cache entries omitted the fork policy. They cannot be reused
+// for either mode because the stored projects no longer carry fork metadata.
+fn owner_cache_key(kind: &str, owner: &str, include_forks: bool) -> String {
+    let selection = if include_forks {
+        "with-forks"
+    } else {
+        "without-forks"
+    };
+    format!("v2-{kind}-{selection}-{owner}")
+}
+
+/// A user's owned repos. Archived repos are excluded and forks are optional.
 pub async fn fetch_user(user: &str, include_forks: bool, refresh: bool) -> Result<Vec<Project>> {
-    let key = format!("user-{user}");
+    let key = owner_cache_key("user", user, include_forks);
     if !refresh {
         if let Some(p) = read_cache(&key) {
             eprintln!(
@@ -122,9 +133,9 @@ pub async fn fetch_user(user: &str, include_forks: bool, refresh: bool) -> Resul
     .await
 }
 
-/// An organization's repos. Forks/archived excluded unless `include_forks`.
+/// An organization's repos. Archived repos are excluded and forks are optional.
 pub async fn fetch_org(org: &str, include_forks: bool, refresh: bool) -> Result<Vec<Project>> {
-    let key = format!("org-{org}");
+    let key = owner_cache_key("org", org, include_forks);
     if !refresh {
         if let Some(p) = read_cache(&key) {
             eprintln!(
@@ -323,4 +334,21 @@ async fn fetch_readme(
     let raw = r.content.replace(['\n', '\r'], "");
     let bytes = base64::engine::general_purpose::STANDARD.decode(raw).ok()?;
     String::from_utf8(bytes).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cache_path, owner_cache_key};
+    use std::collections::HashSet;
+
+    #[test]
+    fn owner_cache_paths_keep_fork_selection_separate_from_legacy_entries() {
+        let mut paths = HashSet::new();
+        for kind in ["org", "user"] {
+            assert!(paths.insert(cache_path(&format!("{kind}-sample"))));
+            for include_forks in [false, true] {
+                assert!(paths.insert(cache_path(&owner_cache_key(kind, "sample", include_forks))));
+            }
+        }
+    }
 }
