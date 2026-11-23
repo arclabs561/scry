@@ -180,9 +180,9 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "clump"
-version = "0.5.7"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3523cad70c8f6ef787a66ca789b81df17965cc058d1c5dd5d03e10a32bfcccf4"
+checksum = "69b0bfe92200ff7fa0164f906a094b636683f3aeb8f1e90e7c4780b53dec33bf"
 dependencies = [
  "rand",
  "thiserror",
